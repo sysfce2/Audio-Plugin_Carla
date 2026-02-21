@@ -1141,7 +1141,7 @@ puglApplySizeHint(PuglView* const view, const PuglSizeHint hint)
   return PUGL_SUCCESS;
 }
 
-PuglStatus
+static PuglStatus
 puglUpdateSizeHints(PuglView* const view)
 {
   for (unsigned i = 0U; i < PUGL_NUM_SIZE_HINTS; ++i) {
@@ -1695,15 +1695,16 @@ puglGetNativeView(const PuglView* view)
 }
 
 PuglStatus
-puglViewStringChanged(PuglView* const      view,
-                      const PuglStringHint key,
-                      const char* const    value)
+puglApplyViewString(PuglView* const      view,
+                    const PuglStringHint key,
+                    const char* const    value)
 {
   if (!view->impl->window) {
     return PUGL_SUCCESS;
   }
 
   switch (key) {
+  case PUGL_APPLICATION_NAME:
   case PUGL_CLASS_NAME:
     return PUGL_UNSUPPORTED;
 

@@ -19,6 +19,7 @@
 #include <X11/Xresource.h>
 #include <X11/Xutil.h>
 #include <X11/keysym.h>
+#include <sys/time.h>
 
 #ifndef USE_XRANDR
 #  if __has_include(<X11/extensions/Xrandr.h>)
@@ -394,14 +395,7 @@ findView(PuglWorld* const world, const Window window)
   return NULL;
 }
 
-PuglStatus
-puglApplySizeHint(PuglView* const view, const PuglSizeHint PUGL_UNUSED(hint))
-{
-  // No fine-grained updates, hints are always recalculated together
-  return puglUpdateSizeHints(view);
-}
-
-PuglStatus
+static PuglStatus
 puglUpdateSizeHints(PuglView* const view)
 {
   if (!view->impl->win) {
@@ -469,6 +463,13 @@ puglUpdateSizeHints(PuglView* const view)
 
   XSetWMNormalHints(display, view->impl->win, &sizeHints);
   return PUGL_SUCCESS;
+}
+
+PuglStatus
+puglApplySizeHint(PuglView* const view, const PuglSizeHint PUGL_UNUSED(hint))
+{
+  // No fine-grained updates, hints are always recalculated together
+  return puglUpdateSizeHints(view);
 }
 
 #if USE_XCURSOR
@@ -641,10 +642,11 @@ puglRealize(PuglView* const view)
 #endif
 
   // Set basic window hints and attributes
-  char* const className = world->strings[PUGL_CLASS_NAME];
-  XClassHint  classHint = {className, className};
+  XClassHint classHint = {world->strings[PUGL_APPLICATION_NAME],
+                          world->strings[PUGL_CLASS_NAME]};
   XSetClassHint(display, impl->win, &classHint);
-  puglSetViewString(view, PUGL_WINDOW_TITLE, view->strings[PUGL_WINDOW_TITLE]);
+  puglApplyViewString(
+    view, PUGL_WINDOW_TITLE, view->strings[PUGL_WINDOW_TITLE]);
   puglSetTransientParent(view, view->transientParent);
   puglUpdateSizeHints(view);
 
@@ -1356,7 +1358,7 @@ puglStartTimer(PuglView* const view, const uintptr_t id, const double timeout)
 #if USE_XSYNC
   if (view->world->impl->syncSupported) {
     XSyncValue value;
-    XSyncIntToValue(&value, (int)floor(timeout * 1000.0));
+    XSyncIntToValue(&value, (int)(timeout * 1000.0));
 
     PuglWorldInternals*  w       = view->world->impl;
     Display* const       display = w->display;
@@ -1426,47 +1428,39 @@ puglStopTimer(PuglView* const view, const uintptr_t id)
   return PUGL_FAILURE;
 }
 
-static XEvent
-eventToX(PuglView* const view, const PuglEvent* const event)
+static PuglStatus
+eventToX(PuglView* const view, const PuglEvent* const event, XEvent* const out)
 {
-  XEvent xev          = PUGL_INIT_STRUCT;
-  xev.xany.send_event = True;
+  memset(out, 0, sizeof(XEvent));
+  out->xany.serial     = 0;
+  out->xany.send_event = True;
+  out->xany.display    = view->world->impl->display;
+  out->xany.window     = view->impl->win;
 
-  switch (event->type) {
-  case PUGL_EXPOSE: {
-    const double x = floor(event->expose.x);
-    const double y = floor(event->expose.y);
-    const double w = ceil(event->expose.x + event->expose.width) - x;
-    const double h = ceil(event->expose.y + event->expose.height) - y;
+  if (event->type == PUGL_EXPOSE) {
+    const double x = event->expose.x;
+    const double y = event->expose.y;
+    const double w = event->expose.x + event->expose.width - x;
+    const double h = event->expose.y + event->expose.height - y;
 
-    xev.xexpose.type    = Expose;
-    xev.xexpose.serial  = 0;
-    xev.xexpose.display = view->world->impl->display;
-    xev.xexpose.window  = view->impl->win;
-    xev.xexpose.x       = (int)x;
-    xev.xexpose.y       = (int)y;
-    xev.xexpose.width   = (int)w;
-    xev.xexpose.height  = (int)h;
-    break;
+    out->xexpose.type   = Expose;
+    out->xexpose.x      = (int)x;
+    out->xexpose.y      = (int)y;
+    out->xexpose.width  = (int)w;
+    out->xexpose.height = (int)h;
+    return PUGL_SUCCESS;
   }
 
-  case PUGL_CLIENT:
-    xev.xclient.type         = ClientMessage;
-    xev.xclient.serial       = 0;
-    xev.xclient.send_event   = True;
-    xev.xclient.display      = view->world->impl->display;
-    xev.xclient.window       = view->impl->win;
-    xev.xclient.message_type = view->world->impl->atoms.PUGL_CLIENT_MSG;
-    xev.xclient.format       = 32;
-    xev.xclient.data.l[0]    = (long)event->client.data1;
-    xev.xclient.data.l[1]    = (long)event->client.data2;
-    break;
-
-  default:
-    break;
+  if (event->type == PUGL_CLIENT) {
+    out->xclient.type         = ClientMessage;
+    out->xclient.message_type = view->world->impl->atoms.PUGL_CLIENT_MSG;
+    out->xclient.format       = 32;
+    out->xclient.data.l[0]    = (long)event->client.data1;
+    out->xclient.data.l[1]    = (long)event->client.data2;
+    return PUGL_SUCCESS;
   }
 
-  return xev;
+  return PUGL_FAILURE;
 }
 
 PuglStatus
@@ -1498,8 +1492,7 @@ puglSendEvent(PuglView* const view, const PuglEvent* const event)
                  &xev));
   }
 
-  xev = eventToX(view, event);
-  if (xev.type) {
+  if (!eventToX(view, event, &xev)) {
     return puglX11Status(XSendEvent(display, impl->win, False, 0, &xev));
   }
 
@@ -1892,9 +1885,9 @@ puglGetNativeView(const PuglView* const view)
 }
 
 PuglStatus
-puglViewStringChanged(PuglView* const      view,
-                      const PuglStringHint key,
-                      const char* const    value)
+puglApplyViewString(PuglView* const      view,
+                    const PuglStringHint key,
+                    const char* const    value)
 {
   Display* const      display = view->world->impl->display;
   const PuglX11Atoms* atoms   = &view->world->impl->atoms;
@@ -1904,6 +1897,7 @@ puglViewStringChanged(PuglView* const      view,
   }
 
   switch (key) {
+  case PUGL_APPLICATION_NAME:
   case PUGL_CLASS_NAME:
     break;
 
